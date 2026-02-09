@@ -3,81 +3,130 @@ import requests
 import urllib.parse
 import time
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="CineMatrix Web", page_icon="🍿", layout="centered")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="CineMatrix Debug", page_icon="🐞")
 
 # --- GESTIÓN DE SECRETOS ---
-# Esto buscará el token en la configuración segura de Streamlit Cloud
 try:
     RD_TOKEN = st.secrets["RD_TOKEN"]
 except:
-    st.error("⚠️ No se ha configurado el Token de Real-Debrid en los 'Secrets' de la app.")
-    st.info("Ve a Manage App -> Settings -> Secrets y añade: RD_TOKEN = 'tu_token_aqui'")
+    st.error("❌ ERROR CRÍTICO: No has configurado el 'RD_TOKEN' en los Secrets.")
     st.stop()
 
 # --- CONSTANTES ---
 CINEMETA_URL = "https://v3-cinemeta.strem.io/catalog/movie/top/search={}.json"
 TORRENTIO_URL = "https://torrentio.strem.fun/stream/movie/{}.json"
+
+# Lista ampliada de proxies para la nube
 PROXIES = [
     "https://api.allorigins.win/raw?url=",
     "https://corsproxy.io/?",
+    "https://api.codetabs.com/v1/proxy?quest=",
+    "https://thingproxy.freeboard.io/fetch/",
 ]
 
-# --- FUNCIONES ---
+# --- FUNCIONES DE LOG ---
+def log(mensaje, tipo="info"):
+    """Muestra mensajes solo si el modo detective está activo"""
+    if st.session_state.get('debug_mode', False):
+        if tipo == "info": st.info(f"ℹ️ {mensaje}")
+        elif tipo == "error": st.error(f"❌ {mensaje}")
+        elif tipo == "ok": st.success(f"✅ {mensaje}")
+        elif tipo == "warn": st.warning(f"⚠️ {mensaje}")
+
+# --- FUNCIONES PRINCIPALES ---
 def buscar_imdb(query):
+    log(f"Buscando en Cinemeta: {query}", "info")
     try:
         url = CINEMETA_URL.format(query)
-        res = requests.get(url, timeout=5).json()
-        if 'metas' in res: return res['metas']
-    except: return []
+        res = requests.get(url, timeout=5)
+        log(f"Estado Cinemeta: {res.status_code}", "info")
+        
+        data = res.json()
+        if 'metas' in data:
+            log(f"Encontradas {len(data['metas'])} pelis", "ok")
+            return data['metas']
+    except Exception as e:
+        log(f"Error conectando a Cinemeta: {e}", "error")
     return []
 
 def obtener_torrents(imdb_id):
     target_url = TORRENTIO_URL.format(imdb_id)
-    # Intento Directo
+    log(f"Objetivo: {target_url}", "info")
+    
+    # 1. Intento Directo
+    log("Iniciando Intento 1: Conexión Directa...", "warn")
     try:
         res = requests.get(target_url, timeout=3)
-        if res.status_code == 200: return res.json().get('streams', [])
-    except: pass
+        if res.status_code == 200:
+            streams = res.json().get('streams', [])
+            log(f"¡Directo funcionó! Streams: {len(streams)}", "ok")
+            return streams
+        else:
+            log(f"Fallo directo. Código: {res.status_code}", "error")
+    except Exception as e:
+        log(f"Excepción directa: {e}", "error")
     
-    # Intento Proxies (por si el servidor bloquea)
-    for proxy in PROXIES:
+    # 2. Intento Proxies
+    log("Iniciando Protocolo de Proxies...", "warn")
+    for i, proxy in enumerate(PROXIES):
         try:
             final_url = f"{proxy}{urllib.parse.quote(target_url)}"
-            res = requests.get(final_url, timeout=5)
-            if res.status_code == 200: return res.json().get('streams', [])
-        except: continue
+            log(f"Probando Espejo {i+1}: {proxy[:30]}...", "info")
+            
+            res = requests.get(final_url, timeout=8)
+            
+            if res.status_code == 200:
+                # Verificamos que sea JSON válido
+                try:
+                    data = res.json()
+                except:
+                    log("El espejo devolvió texto, no JSON válido.", "error")
+                    continue
+                
+                if 'streams' in data:
+                    streams = data['streams']
+                    log(f"¡ÉXITO con Espejo {i+1}! Streams encontrados: {len(streams)}", "ok")
+                    return streams
+                else:
+                    log("JSON recibido pero sin 'streams'.", "warn")
+            else:
+                log(f"Espejo {i+1} falló. Código: {res.status_code}", "error")
+                
+        except Exception as e:
+            log(f"Error crítico en Espejo {i+1}: {e}", "error")
+            continue
+            
+    log("FATAL: Todos los intentos fallaron.", "error")
     return []
 
 def procesar_rd(magnet):
     headers = {"Authorization": f"Bearer {RD_TOKEN}"}
     base_url = "https://api.real-debrid.com/rest/1.0"
     
-    # 1. Añadir Magnet a Real-Debrid
-    data = {"magnet": magnet}
-    res = requests.post(f"{base_url}/torrents/addMagnet", headers=headers, data=data)
+    log("Enviando magnet a Real-Debrid...", "info")
+    res = requests.post(f"{base_url}/torrents/addMagnet", headers=headers, data={"magnet": magnet})
     
     if res.status_code != 201:
-        st.error(f"Error al enviar magnet: {res.status_code}")
+        log(f"Error RD AddMagnet: {res.status_code} - {res.text}", "error")
         return None
         
     rd_id = res.json()['id']
+    log(f"Magnet añadido. ID: {rd_id}", "ok")
     
-    # 2. Seleccionar Archivo (Esperamos a que RD procese el torrent)
-    with st.spinner("☁️ La nube está procesando el torrent..."):
+    with st.spinner("Procesando en la nube..."):
         attempts = 0
-        while attempts < 15: # 15 segundos máximo
+        while attempts < 15:
             time.sleep(1)
             info = requests.get(f"{base_url}/torrents/info/{rd_id}", headers=headers).json()
-            status = info['status']
+            estado = info['status']
             
-            if status == 'waiting_files_selection':
-                # Seleccionamos el archivo más grande (generalmente la película)
+            if estado == 'waiting_files_selection':
                 archivo_top = max(info['files'], key=lambda x: x['bytes'])
                 requests.post(f"{base_url}/torrents/selectFiles/{rd_id}", headers=headers, data={"files": str(archivo_top['id'])})
+                log("Archivo seleccionado.", "info")
             
-            elif status == 'downloaded':
-                # Ya está listo, generamos el enlace directo
+            elif estado == 'downloaded':
                 link_fuente = info['links'][0]
                 unrestrict = requests.post(f"{base_url}/unrestrict/link", headers=headers, data={"link": link_fuente}).json()
                 return unrestrict['download']
@@ -85,64 +134,32 @@ def procesar_rd(magnet):
             attempts += 1
     return None
 
-# --- INTERFAZ GRÁFICA ---
-st.title("🍿 CineMatrix Cloud")
-st.markdown("Tu buscador privado de streaming con Real-Debrid.")
+# --- INTERFAZ ---
+st.title("🕵️ CineMatrix Debugger")
+st.checkbox("Activar Modo Detective (Ver Logs)", key="debug_mode")
 
-# Pestañas
-tab1, tab2 = st.tabs(["🔍 Buscar", "📜 Historial (Sesión)"])
+query = st.text_input("Película:")
 
-with tab1:
-    query = st.text_input("¿Qué quieres ver hoy?", placeholder="Ej: Matrix, Avatar...")
+if st.button("Buscar") and query:
+    resultados = buscar_imdb(query)
     
-    if query:
-        resultados = buscar_imdb(query)
-        if resultados:
-            st.success(f"Encontradas {len(resultados)} coincidencias.")
-            
-            # Selector de película
-            opciones = {f"{m['name']} ({m.get('releaseInfo', 'N/A')})": m for m in resultados}
-            seleccion_nombre = st.selectbox("Elige la película:", list(opciones.keys()))
+    if resultados:
+        opciones = {f"{m['name']} ({m.get('releaseInfo', 'N/A')})": m for m in resultados}
+        seleccion_nombre = st.selectbox("Resultados:", list(opciones.keys()))
+        
+        if st.button("Escanear Enlaces"):
             seleccion = opciones[seleccion_nombre]
+            streams = obtener_torrents(seleccion['imdb_id'])
             
-            if st.button("Buscar Enlaces"):
-                with st.spinner("Escaneando trackers..."):
-                    streams = obtener_torrents(seleccion['imdb_id'])
-                
-                if streams:
-                    st.markdown("### 📺 Calidades Disponibles")
-                    # Mostramos solo los primeros 5 resultados para no saturar
-                    for s in streams[:5]:
-                        titulo = s['title'].split('\n')[0]
-                        # Usamos el hash como key única para el botón
-                        if st.button(f"🎬 {titulo}", key=s.get('infoHash', titulo)):
-                            # Construcción correcta del magnet
-                            info_hash = s['infoHash']
-                            magnet_link = f"magnet:?xt=urn:btih:{info_hash}&dn={urllib.parse.quote(seleccion['name'])}"
-                            
-                            link_final = procesar_rd(magnet_link)
-                            
-                            if link_final:
-                                st.balloons()
-                                st.success("¡Enlace generado!")
-                                st.code(link_final)
-                                st.markdown(f"[👉 Abrir / Descargar]({link_final})")
-                                
-                                # Guardar en historial de sesión
-                                if 'historial' not in st.session_state:
-                                    st.session_state.historial = []
-                                st.session_state.historial.append({'titulo': seleccion['name'], 'link': link_final})
-                            else:
-                                st.error("No se pudo generar el enlace. Puede que el torrent tenga pocos seeds.")
-                else:
-                    st.warning("No se encontraron torrents activos para esta película.")
-
-with tab2:
-    if 'historial' in st.session_state and st.session_state.historial:
-        st.write("Enlaces generados en esta sesión:")
-        for item in st.session_state.historial:
-            st.markdown(f"**{item['titulo']}**")
-            st.code(item['link'])
-            st.divider()
-    else:
-        st.info("El historial está vacío.")
+            if streams:
+                for s in streams[:5]:
+                    titulo = s['title'].split('\n')[0]
+                    if st.button(f"🎬 {titulo}", key=s['infoHash']):
+                        magnet = f"magnet:?xt=urn:btih:{s['infoHash']}&dn={urllib.parse.quote(seleccion['name'])}"
+                        link = procesar_rd(magnet)
+                        if link:
+                            st.success("¡Enlace generado!")
+                            st.code(link)
+                            st.link_button("Abrir Video", link)
+            else:
+                st.error("No se encontraron enlaces tras probar todos los métodos.")
