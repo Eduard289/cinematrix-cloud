@@ -140,4 +140,4 @@ with col2:
         elif "❌" in line:
             log_container.error(line)
         else:
-            log_container.text(line)info("No has descargado nada aún.")
+            log_container.text(line)
