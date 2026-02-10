@@ -1,203 +1,184 @@
+
 import streamlit as st
 import requests
 import urllib.parse
 import time
 
-# ==========================================
-#      CONFIGURACIÓN Y SECRETOS
-# ==========================================
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="CineMatrix Privado", page_icon="🔐", layout="centered")
 
-# Tu Token de Real-Debrid (Ya integrado)
-RD_TOKEN = "3HXX4FQQMTNQ6XRUZA3XZL2ZN7IKZVZEVYK3HUC2LCE7WFJBFPYQ"
+# --- SISTEMA DE SEGURIDAD (LOGIN) ---
+# Define tu contraseña aquí o en los Secrets (mejor en secrets)
+try:
+    ACCESS_PASSWORD = st.secrets["APP_PASSWORD"]
+except:
+    ACCESS_PASSWORD = "admin" # Contraseña por defecto si no se configura
 
-# Configuración de la página web
-st.set_page_config(page_title="CineMatrix PC", page_icon="🍿", layout="centered")
+def check_password():
+    """Retorna True si el usuario ha iniciado sesión correctamente."""
+    if 'password_correct' not in st.session_state:
+        st.session_state.password_correct = False
 
-# ==========================================
-#      RED DE ESPEJOS (ANTI-BLOQUEO)
-# ==========================================
-# Esta lista permite que el script salte de un servidor a otro
-# hasta encontrar uno que tu operador (Guuk) no haya bloqueado.
-ESPEJOS = [
-    "https://api.allorigins.win/raw?url=",      # Espejo 1 (Muy fiable)
-    "https://corsproxy.io/?",                   # Espejo 2 (Rápido)
-    "https://api.codetabs.com/v1/proxy?quest=", # Espejo 3
-    "https://thingproxy.freeboard.io/fetch/",   # Espejo 4
-    "https://api.cors.lol/?url=",               # Espejo 5
-]
+    if st.session_state.password_correct:
+        return True
 
-# URLs Base
+    st.markdown("### 🔐 Acceso Restringido")
+    pwd = st.text_input("Introduce la contraseña de acceso:", type="password")
+    
+    if st.button("Entrar"):
+        if pwd == ACCESS_PASSWORD:
+            st.session_state.password_correct = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta.")
+    return False
+
+if not check_password():
+    st.stop() # Detiene la ejecución si no hay login
+
+# --- GESTIÓN DE SECRETOS ---
+try:
+    RD_TOKEN = st.secrets["RD_TOKEN"]
+except:
+    st.error("⚠️ Falta configurar el RD_TOKEN en los Secrets.")
+    st.stop()
+
+# --- CONSTANTES ---
 CINEMETA_URL = "https://v3-cinemeta.strem.io/catalog/movie/top/search={}.json"
 TORRENTIO_URL = "https://torrentio.strem.fun/stream/movie/{}.json"
+HEADERS = {"Authorization": f"Bearer {RD_TOKEN}"}
+BASE_URL = "https://api.real-debrid.com/rest/1.0"
 
-# ==========================================
-#           MOTORES DE BÚSQUEDA
-# ==========================================
-
-def buscar_cine(query):
-    """Busca carátulas y nombres en Cinemeta"""
+# --- FUNCIONES ---
+def buscar_imdb(query):
     try:
         url = CINEMETA_URL.format(query)
-        # Intentamos conexión directa primero
-        try:
-            res = requests.get(url, timeout=3)
-            data = res.json()
-        except:
-            # Si falla, usamos el primer espejo
-            res = requests.get(ESPEJOS[0] + urllib.parse.quote(url), timeout=5)
-            data = res.json()
-
-        if 'metas' in data:
-            return data['metas']
-    except Exception as e:
-        st.error(f"Error buscando peli: {e}")
+        res = requests.get(url, timeout=5).json()
+        if 'metas' in res: return res['metas']
+    except: return []
     return []
 
-def obtener_torrents_indestructible(imdb_id):
-    """
-    Busca enlaces en Torrentio usando la técnica 'Round Robin'
-    para evadir bloqueos de operador.
-    """
+def obtener_torrents(imdb_id):
+    # Usamos proxies por seguridad
+    proxies_list = ["https://api.allorigins.win/raw?url=", "https://corsproxy.io/?"]
     target_url = TORRENTIO_URL.format(imdb_id)
-    status_text = st.empty() # Espacio para mensajes de estado
     
-    # 1. Intento Directo (Rápido)
-    try:
-        res = requests.get(target_url, timeout=2)
-        if res.status_code == 200:
-            return res.json().get('streams', [])
-    except:
-        pass # Fallo silencioso, activamos espejos
-
-    # 2. Rotación de Espejos
-    for i, espejo in enumerate(ESPEJOS):
-        status_text.text(f"🔄 Probando ruta alternativa {i+1}...")
+    for proxy in proxies_list:
         try:
-            # Codificamos la URL para que viaje segura
-            final_url = f"{espejo}{urllib.parse.quote(target_url)}"
-            res = requests.get(final_url, timeout=6)
-            
-            if res.status_code == 200:
-                data = res.json()
-                if 'streams' in data:
-                    status_text.empty()
-                    return data['streams']
-        except:
-            continue # Si falla, siguiente espejo
-            
-    status_text.error("❌ Todos los espejos fallaron. Revisa tu internet.")
+            final_url = f"{proxy}{urllib.parse.quote(target_url)}"
+            res = requests.get(final_url, timeout=5)
+            if res.status_code == 200: 
+                streams = res.json().get('streams', [])
+                # Filtramos y limpiamos datos
+                cleaned = []
+                for s in streams:
+                    title_parts = s['title'].split('\n')
+                    calidad = "Desconocida"
+                    seeders = "N/A"
+                    for part in title_parts:
+                        if "4k" in part.lower(): calidad = "🌟 4K UHD"
+                        elif "1080p" in part.lower(): calidad = "📺 1080p"
+                        elif "720p" in part.lower(): calidad = "📱 720p"
+                        if "👤" in part: seeders = part # Torrentio suele poner seeders con este icono
+                    
+                    cleaned.append({
+                        'title': title_parts[0],
+                        'quality': calidad,
+                        'seeds': seeders,
+                        'infoHash': s['infoHash']
+                    })
+                return cleaned
+        except: continue
     return []
 
-# ==========================================
-#           GESTOR REAL-DEBRID
-# ==========================================
+def borrar_torrent(rd_id):
+    requests.delete(f"{BASE_URL}/torrents/delete/{rd_id}", headers=HEADERS)
 
-def procesar_en_nube(magnet):
-    """Sube el magnet a RD y devuelve el link directo"""
-    headers = {"Authorization": f"Bearer {RD_TOKEN}"}
-    base_url = "https://api.real-debrid.com/rest/1.0"
-
-    # 1. Subir Magnet
-    res = requests.post(f"{base_url}/torrents/addMagnet", headers=headers, data={"magnet": magnet})
-    if res.status_code != 201:
-        st.error("Error al enviar a la nube (Token inválido o servicio caído).")
-        return None
+def procesar_rd(magnet):
+    # 1. Añadir Magnet
+    res = requests.post(f"{BASE_URL}/torrents/addMagnet", headers=HEADERS, data={"magnet": magnet})
+    if res.status_code != 201: return None, None
     
     rd_id = res.json()['id']
     
-    # 2. Barra de progreso y selección de archivo
-    barra = st.progress(0, text="☁️ Iniciando motor de la nube...")
+    # 2. Seleccionar Archivo
+    with st.spinner("☁️ Procesando en la nube (esto puede tardar unos segundos)..."):
+        attempts = 0
+        while attempts < 20:
+            time.sleep(1)
+            info = requests.get(f"{BASE_URL}/torrents/info/{rd_id}", headers=HEADERS).json()
+            status = info['status']
+            
+            if status == 'waiting_files_selection':
+                archivo_top = max(info['files'], key=lambda x: x['bytes'])
+                requests.post(f"{BASE_URL}/torrents/selectFiles/{rd_id}", headers=HEADERS, data={"files": str(archivo_top['id'])})
+            
+            elif status == 'downloaded':
+                link_fuente = info['links'][0]
+                unrestrict = requests.post(f"{base_url}/unrestrict/link", headers=HEADERS, data={"link": link_fuente}).json()
+                return unrestrict.get('download'), rd_id # Devolvemos link y ID para poder borrar
+            
+            elif status == 'error':
+                return None, rd_id
+            
+            attempts += 1
+    return None, rd_id
+
+# --- INTERFAZ GRÁFICA ---
+st.title("🍿 CineMatrix Privado")
+st.markdown(f"Bienvenido. Sistema seguro activo.")
+
+tab1, tab2 = st.tabs(["🔍 Buscador", "⚙️ Gestión Activa"])
+
+with tab1:
+    query = st.text_input("Buscar película:", placeholder="Escribe el título...")
     
-    for i in range(15): # Intentos durante 15 segundos
-        time.sleep(1)
-        info = requests.get(f"{base_url}/torrents/info/{rd_id}", headers=headers).json()
-        estado = info['status']
-        
-        if estado == 'waiting_files_selection':
-            # Seleccionar el archivo más grande (la película)
-            archivos = info['files']
-            archivo_top = max(archivos, key=lambda x: x['bytes'])
-            requests.post(f"{base_url}/torrents/selectFiles/{rd_id}", headers=headers, data={"files": str(archivo_top['id'])})
-            barra.progress(50, text="📁 Archivo seleccionado. Descomprimiendo...")
-        
-        elif estado == 'downloaded':
-            barra.progress(100, text="✨ ¡Completado!")
-            # Obtener link final
-            link_fuente = info['links'][0]
-            unrestrict = requests.post(f"{base_url}/unrestrict/link", headers=headers, data={"link": link_fuente}).json()
-            return unrestrict['download']
-        
-        elif estado == 'downloading':
-            progreso_real = info.get('progress', 0)
-            barra.progress(progreso_real, text=f"🚀 Descargando en servidores RD: {progreso_real}%")
-
-    return None
-
-# ==========================================
-#           INTERFAZ GRÁFICA
-# ==========================================
-
-st.title("🍿 CineMatrix PC")
-st.markdown("Tu estación de combate para streaming ilimitado.")
-
-# --- PASO 1: BÚSQUEDA ---
-col1, col2 = st.columns([3, 1])
-with col1:
-    query = st.text_input("¿Qué quieres ver?", placeholder="Ej: Oppenheimer, Matrix...")
-with col2:
-    st.write("")
-    st.write("")
-    buscar_btn = st.button("🔍 Buscar")
-
-if buscar_btn and query:
-    resultados = buscar_cine(query)
-    
-    if resultados:
-        # Guardamos resultados en sesión para no perderlos al recargar
-        st.session_state['resultados'] = resultados
-        st.session_state['streams'] = None # Limpiamos streams anteriores
-    else:
-        st.warning("No se encontraron resultados.")
-
-# --- PASO 2: SELECCIÓN ---
-if 'resultados' in st.session_state and st.session_state['resultados']:
-    opciones = {f"{m['name']} ({m.get('releaseInfo', 'N/A')})": m for m in st.session_state['resultados']}
-    seleccion_nombre = st.selectbox("Resultados encontrados:", list(opciones.keys()))
-    
-    if st.button("📡 Escanear Enlaces (Torrentio)"):
-        seleccion = opciones[seleccion_nombre]
-        with st.spinner("Saltando bloqueos de operador..."):
-            streams = obtener_torrents_indestructible(seleccion['imdb_id'])
-            st.session_state['streams'] = streams
-            st.session_state['peli_actual'] = seleccion['name']
-
-# --- PASO 3: GENERACIÓN ---
-if 'streams' in st.session_state and st.session_state['streams']:
-    st.divider()
-    st.subheader(f"Enlaces para: {st.session_state['peli_actual']}")
-    
-    for s in st.session_state['streams'][:8]: # Mostramos los 8 mejores
-        # Limpieza de título
-        titulo = s['title'].split('\n')[0].replace('👤', '').strip()
-        
-        # Detector de Calidad Visual
-        if "4k" in s['title'].lower(): icono = "🌟 4K UHD"
-        elif "1080p" in s['title'].lower(): icono = "📺 1080p"
-        else: icono = "📱 Calidad Std"
-        
-        col_a, col_b = st.columns([4, 1])
-        with col_a:
-            st.info(f"{icono} | {titulo}")
-        with col_b:
-            # Botón único por cada enlace
-            if st.button("VER ▶️", key=s['infoHash']):
-                magnet = f"magnet:?xt=urn:btih:{s['infoHash']}&dn={urllib.parse.quote(st.session_state['peli_actual'])}"
-                
-                link_final = procesar_en_nube(magnet)
-                
-                if link_final:
-                    st.success("✅ ¡ENLACE LISTO!")
-                    st.code(link_final)
-                    st.link_button("Abrir en Navegador/VLC", link_final)
+    if query:
+        resultados = buscar_imdb(query)
+        if resultados:
+            st.success(f"Encontradas {len(resultados)} películas.")
+            sel_name = st.selectbox("Selecciona:", [m['name'] + f" ({m.get('releaseInfo','')})" for m in resultados])
+            # Encontrar el objeto seleccionado
+            seleccion = next(m for m in resultados if m['name'] in sel_name)
+            
+            if st.button("Buscar Enlaces"):
+                streams = obtener_torrents(seleccion['imdb_id'])
+                if streams:
+                    st.write("### Resultados Disponibles")
+                    for s in streams[:8]: # Top 8
+                        col1, col2, col3 = st.columns([3, 1, 1])
+                        with col1:
+                            st.write(f"**{s['title']}**")
+                            st.caption(f"{s['quality']} | {s['seeds']}")
+                        with col2:
+                            if st.button("📥 Descargar", key=s['infoHash']):
+                                magnet = f"magnet:?xt=urn:btih:{s['infoHash']}&dn={urllib.parse.quote(seleccion['name'])}"
+                                link, rd_id = procesar_rd(magnet)
+                                if link:
+                                    st.success("¡Listo!")
+                                    st.code(link)
+                                    st.markdown(f"[Abrir Directamente]({link})")
+                                    # Guardar en historial
+                                    if 'historial' not in st.session_state: st.session_state.historial = []
+                                    st.session_state.historial.append({'titulo': seleccion['name'], 'link': link, 'id': rd_id})
+                                else:
+                                    st.error("Error o timeout en Real-Debrid.")
+                        st.divider()
                 else:
-                    st.error("Error al procesar.")
+                    st.warning("No se encontraron enlaces de calidad.")
+
+with tab2:
+    st.write("### 📜 Historial de Sesión y Limpieza")
+    if 'historial' in st.session_state and st.session_state.historial:
+        for idx, item in enumerate(st.session_state.historial):
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                st.write(f"🎬 **{item['titulo']}**")
+                st.code(item['link'])
+            with c2:
+                if st.button("🗑️ Borrar", key=f"del_{idx}"):
+                    borrar_torrent(item['id'])
+                    st.warning("Torrent eliminado de la nube RD.")
+            st.divider()
+    else:
+        st.info("No hay descargas recientes en esta sesión.")
