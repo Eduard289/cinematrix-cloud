@@ -4,140 +4,193 @@ import urllib.parse
 import time
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="CineMatrix Diagnóstico", page_icon="🚑", layout="wide")
+st.set_page_config(page_title="CineMatrix Final", page_icon="🎬", layout="centered")
 
-# --- LOGIN ---
+# --- LOGIN (Tu seguridad) ---
+if 'password_correct' not in st.session_state:
+    st.session_state.password_correct = False
+
 def check_password():
-    if st.session_state.get('password_correct', False): return True
-    pwd = st.text_input("Contraseña:", type="password")
-    if st.button("Entrar"):
-        if pwd == st.secrets["APP_PASSWORD"]:
+    if st.session_state.password_correct: return True
+    st.markdown("### 🔐 Acceso CineMatrix")
+    try:
+        if st.text_input("Contraseña:", type="password") == st.secrets["APP_PASSWORD"]:
             st.session_state.password_correct = True
             st.rerun()
+    except:
+        st.error("⚠️ Configura APP_PASSWORD en Secrets")
+        st.stop()
     return False
 
 if not check_password(): st.stop()
 
-# --- LOGGING ---
-if 'logs' not in st.session_state: st.session_state.logs = []
+# --- GESTIÓN DE TOKEN ---
+try:
+    RD_TOKEN = st.secrets["RD_TOKEN"]
+except:
+    st.error("Falta RD_TOKEN")
+    st.stop()
 
-def log(mensaje, estado="INFO"):
-    t = time.strftime("%H:%M:%S")
-    icono = "🔹"
-    if estado == "SUCCESS": icono = "✅"
-    elif estado == "ERROR": icono = "❌"
-    elif estado == "WARN": icono = "⚠️"
-    st.session_state.logs.append(f"{t} {icono} {mensaje}")
-
-# --- PROVEEDORES Y RUTAS ---
-# Probaremos 3 vías para cada proveedor
+# --- CONSTANTES ---
+# Usamos APIs que NO suelen bloquear a servidores Cloud
 PROVIDERS = [
-    {"name": "Torrentio Original", "url": "https://torrentio.strem.fun/stream/movie/{}.json"},
-    {"name": "Torrentio Mirror (Elf)", "url": "https://torrentio.elfhosted.com/stream/movie/{}.json"},
-    {"name": "KnightCrawler", "url": "https://knightcrawler.elfhosted.com/stream/movie/{}.json"},
-]
-
-PROXIES = [
-    {"name": "Directo (Sin Proxy)", "p": ""},
-    {"name": "Proxy AllOrigins", "p": "https://api.allorigins.win/raw?url="},
-    {"name": "Proxy CorsProxy", "p": "https://corsproxy.io/?"},
+    # 1. YTS: La mejor para películas (API Pública y abierta)
+    {"name": "YTS.mx (Oficial)", "type": "yts", "url": "https://yts.mx/api/v2/movie_details.json?imdb_id={}"},
+    # 2. Annatar: Un clon de Torrentio hospedado en ElfHosted (Suele ser permisivo)
+    {"name": "Annatar (Elf)", "type": "stremio", "url": "https://annatar.elfhosted.com/stream/movie/{}.json"},
 ]
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
 
-# --- LÓGICA DE TEST ---
-def test_connection(imdb_id):
-    st.session_state.logs = [] # Limpiar
-    log(f"Iniciando diagnóstico para ID: {imdb_id}")
+# --- FUNCIONES ---
+def buscar_imdb(query):
+    try:
+        url = f"https://v3-cinemeta.strem.io/catalog/movie/top/search={query}.json"
+        res = requests.get(url, headers=HEADERS, timeout=5).json()
+        if 'metas' in res: return res['metas']
+    except: return []
+    return []
+
+def obtener_enlaces(imdb_id):
+    links = []
     
-    enlaces_validos = []
+    # Barra de carga
+    progreso = st.progress(0, text="Buscando en YTS y Annatar...")
     
-    # Barra de progreso
-    bar = st.progress(0)
-    total_steps = len(PROVIDERS) * len(PROXIES)
-    step = 0
-    
-    for prov in PROVIDERS:
-        for proxy in PROXIES:
-            step += 1
-            bar.progress(int((step / total_steps) * 100))
+    for i, prov in enumerate(PROVIDERS):
+        try:
+            target = prov['url'].format(imdb_id)
+            res = requests.get(target, headers=HEADERS, timeout=8)
             
-            target_url = prov['url'].format(imdb_id)
-            if proxy['p']:
-                final_url = f"{proxy['p']}{urllib.parse.quote(target_url)}"
-            else:
-                final_url = target_url
+            if res.status_code == 200:
+                data = res.json()
                 
-            try:
-                log(f"Probando {prov['name']} vía {proxy['name']}...", "INFO")
-                start_time = time.time()
-                res = requests.get(final_url, headers=HEADERS, timeout=5)
-                elapsed = round(time.time() - start_time, 2)
-                
-                if res.status_code == 200:
-                    try:
-                        data = res.json()
-                        if 'streams' in data and len(data['streams']) > 0:
-                            num = len(data['streams'])
-                            log(f"¡ÉXITO! {prov['name']} ({proxy['name']}) -> {num} enlaces en {elapsed}s", "SUCCESS")
+                # --- PARSER PARA YTS ---
+                if prov['type'] == 'yts':
+                    if 'data' in data and 'movie' in data['data'] and 'torrents' in data['data']['movie']:
+                        movie_title = data['data']['movie']['title']
+                        for t in data['data']['movie']['torrents']:
+                            calidad = f"🌟 {t['quality']} ({t['type']})"
+                            seeds = f"👤 {t['seeds']}"
+                            # Construir magnet manualmente para YTS
+                            magnet = f"magnet:?xt=urn:btih:{t['hash']}&dn={urllib.parse.quote(movie_title)}"
                             
-                            # Guardamos uno de ejemplo
-                            for s in data['streams'][:3]:
-                                enlaces_validos.append({
-                                    'title': s.get('title', 'Sin titulo').split('\n')[0],
-                                    'hash': s['infoHash'],
-                                    'source': f"{prov['name']} via {proxy['name']}"
-                                })
-                            # Si encontramos algo, podríamos parar, pero en diagnóstico seguimos
-                        else:
-                            log(f"Respuesta vacía (0 streams) de {prov['name']}", "WARN")
-                    except:
-                        log(f"Error JSON en {prov['name']}. Posible bloqueo HTML.", "ERROR")
-                else:
-                    log(f"Error HTTP {res.status_code} en {prov['name']}", "ERROR")
+                            links.append({
+                                'source': "🟢 YTS.mx",
+                                'title': f"{movie_title} [{t['quality']}]",
+                                'quality': calidad,
+                                'seeds': seeds,
+                                'magnet': magnet
+                            })
+
+                # --- PARSER PARA STREMIO (Annatar) ---
+                elif prov['type'] == 'stremio':
+                    if 'streams' in data:
+                        for s in data['streams']:
+                            title_raw = s.get('title', 'Link').split('\n')[0]
+                            calidad = "📺 HD"
+                            if "4k" in title_raw.lower(): calidad = "🌟 4K"
+                            elif "1080p" in title_raw.lower(): calidad = "📺 1080p"
+                            
+                            links.append({
+                                'source': "🔵 Annatar",
+                                'title': title_raw,
+                                'quality': calidad,
+                                'seeds': "N/A",
+                                'magnet': f"magnet:?xt=urn:btih:{s['infoHash']}&dn=Movie"
+                            })
+                            
+        except Exception as e:
+            print(f"Error en {prov['name']}: {e}")
             
-            except Exception as e:
-                log(f"Fallo conexión: {str(e)[:50]}...", "ERROR")
-                
-    bar.empty()
-    return enlaces_validos
+        progreso.progress((i + 1) * 50)
+        
+    progreso.empty()
+    return links
+
+def procesar_rd(magnet):
+    # API Real-Debrid
+    url = "https://api.real-debrid.com/rest/1.0"
+    auth = {"Authorization": f"Bearer {RD_TOKEN}"}
+    
+    try:
+        # 1. Añadir
+        add = requests.post(f"{url}/torrents/addMagnet", headers=auth, data={"magnet": magnet})
+        if add.status_code != 201: return None
+        rd_id = add.json()['id']
+        
+        # 2. Seleccionar archivo
+        with st.spinner("☁️ Desencriptando en Real-Debrid..."):
+            attempts = 0
+            while attempts < 10:
+                time.sleep(1)
+                info = requests.get(f"{url}/torrents/info/{rd_id}", headers=auth).json()
+                if info['status'] == 'waiting_files_selection':
+                    f = max(info['files'], key=lambda x: x['bytes'])
+                    requests.post(f"{url}/torrents/selectFiles/{rd_id}", headers=auth, data={"files": str(f['id'])})
+                elif info['status'] == 'downloaded':
+                    link = requests.post(f"{url}/unrestrict/link", headers=auth, data={"link": info['links'][0]}).json()
+                    return link.get('download')
+                elif info['status'] == 'error':
+                    return None
+                attempts += 1
+    except:
+        return None
+    return None
 
 # --- INTERFAZ ---
-col1, col2 = st.columns([1, 1])
+st.title("🍿 CineMatrix Final")
+st.caption("Motores: YTS + Annatar")
 
-with col1:
-    st.subheader("🔍 Prueba de Conexión")
-    query = st.text_input("Pelicula:", value="Gladiator")
-    if st.button("Ejecutar Diagnóstico"):
-        # Buscar ID
-        try:
-            meta = requests.get(f"https://v3-cinemeta.strem.io/catalog/movie/top/search={query}.json").json()
-            if meta['metas']:
-                movie = meta['metas'][0]
-                st.info(f"Probando con: {movie['name']} ({movie['releaseInfo']})")
-                res = test_connection(movie['imdb_id'])
+tab1, tab2 = st.tabs(["BUSCADOR", "AYUDA"])
+
+with tab1:
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        q = st.text_input("Película:", placeholder="Ej: Gladiator")
+    with col2:
+        st.write("")
+        st.write("")
+        btn = st.button("Buscar")
+
+    if q:
+        res = buscar_imdb(q)
+        if res:
+            st.success(f"Encontradas: {len(res)}")
+            sel_txt = st.selectbox("Elige:", [f"{r['name']} ({r.get('releaseInfo','?')})" for r in res])
+            sel = next(r for r in res if f"{r['name']} ({r.get('releaseInfo','?')})" == sel_txt)
+            
+            if st.button(f"Ver Enlaces de {sel['name']}"):
+                resultados = obtener_enlaces(sel['imdb_id'])
                 
-                if res:
-                    st.success("✅ Se encontraron rutas válidas.")
-                    st.write("### Enlaces extraídos:")
-                    for r in res:
-                        st.code(f"{r['source']}\n{r['title']}")
+                if resultados:
+                    st.divider()
+                    for item in resultados[:8]:
+                        with st.container():
+                            c1, c2, c3 = st.columns([4, 2, 2])
+                            with c1:
+                                st.write(f"**{item['quality']}**")
+                                st.caption(f"{item['title']}")
+                            with c2:
+                                st.write(item['source'])
+                                st.caption(item['seeds'])
+                            with c3:
+                                if st.button("📥 Bajar", key=item['title'][:10]+item['source']):
+                                    link_final = procesar_rd(item['magnet'])
+                                    if link_final:
+                                        st.balloons()
+                                        st.success("¡Listo!")
+                                        st.code(link_final)
+                                        st.markdown(f"[👉 Abrir Link]({link_final})")
+                                    else:
+                                        st.error("Error al procesar en RD")
+                        st.divider()
                 else:
-                    st.error("❌ Ninguna ruta funcionó.")
-            else:
-                st.error("Película no encontrada en Cinemeta.")
-        except Exception as e:
-            st.error(f"Error crítico en Cinemeta: {e}")
-
-with col2:
-    st.subheader("📟 Log en Tiempo Real")
-    log_container = st.container(height=500)
-    for line in st.session_state.logs:
-        if "✅" in line:
-            log_container.success(line)
-        elif "❌" in line:
-            log_container.error(line)
+                    st.error("No se encontraron enlaces en YTS ni Annatar. Intenta otra peli.")
         else:
-            log_container.text(line)
+            st.warning("No encontrada en Cinemeta.")
+
+with tab2:
+    st.info("Si YTS falla, prueba con pelis muy famosas (Avatar, Matrix, etc).")
